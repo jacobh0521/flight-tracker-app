@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import the application factory function
-from flightapp import create_app
+from flightapp.app import create_app
 
 # The 'application' variable is the standard WSGI callable name Gunicorn looks for.
 # Gunicorn will call this variable to get the Flask application instance.
