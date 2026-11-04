@@ -153,7 +153,7 @@ def api_fetch():
 
 @bp.route("/api/flow")
 def api_flow():
-    airport = (request.args.get("airport") or "KJFK").strip().upper()
+    airport = airport = _to_icao(request.args.get("airport") or "KJFK")
     coords = get_airport_coordinates(airport)
     flows = get_flow_states(airport)
     return jsonify({
