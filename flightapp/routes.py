@@ -30,12 +30,12 @@ def _to_icao(code: str) -> str:
 @bp.route("/")
 def index():
     default_airport = os.getenv("DEFAULT_AIRPORT", "KDCA")
-    airport = session.get("last_airport", default_airport)
+    airport = _to_icao(session.get("last_airport", default_airport))
     minutes_back = int(session.get("minutes_back", 30))
 
     try:
         flights_raw, summary_rows = get_flights_for_last_search(
-            airport=_to_icao(airport),
+            airport=airport,
             minutes_back=minutes_back,
             arrival_lag=0,
             arrival_buffer=0
@@ -66,15 +66,15 @@ def index():
 
     def compute_delay(rows):
         vals = [r[5] for r in rows if r[5] is not None]
-        return {"min": 0, "max": 0, "avg": 0} if not vals else {"min": min(vals), "max": max(vals), "avg": round(sum(vals)/len(vals),2)}
+        return {"min": 0, "max": 0, "avg": 0} if not vals else {"min": min(vals), "max": max(vals), "avg": round(sum(vals)/len(vals), 2)}
 
     def compute_spacing(rows):
         times = [int(r[7]) for r in rows if r[7] is not None]
         times.sort()
         if len(times) < 2:
-            return {"min":0, "max":0, "avg":0}
-        deltas = [b-a for a,b in zip(times[:-1], times[1:])]
-        return {"min": round(min(deltas)/60,2), "max": round(max(deltas)/60,2), "avg": round(sum(deltas)/len(deltas)/60,2)}
+            return {"min": 0, "max": 0, "avg": 0}
+        deltas = [b - a for a, b in zip(times[:-1], times[1:])]
+        return {"min": round(min(deltas)/60, 2), "max": round(max(deltas)/60, 2), "avg": round(sum(deltas)/len(deltas)/60, 2)}
 
     metric_data = {
         "last_search_info": {"total_flights": len(flights_raw), "minutes_back": minutes_back, "include_arrivals": False},
@@ -88,14 +88,12 @@ def api_fetch():
     t0 = _now()
     data = request.args if request.method == 'GET' else request.get_json(force=True)
 
-    airport = (data.get("airport") or "").strip().upper()
+    airport = _to_icao(data.get("airport") or "KDCA")
     minutes_back = int(data.get("minutes_back", 30))
-    if len(airport) == 3:
-        airport = "K" + airport
 
     now_ts = _now()
 
-    # --- INSTANT SERVER-SIDE CACHE CHECK (TTL: 30 minutes) ---
+    # --- INSTANT SERVER-SIDE CACHE CHECK (TTL: 5 minutes) ---
     existing_flights, _ = get_flights_for_last_search(
         airport=airport, 
         minutes_back=minutes_back, 
@@ -105,8 +103,7 @@ def api_fetch():
     
     if existing_flights:
         newest_event_time = max([int(r[7]) for r in existing_flights if r[7] is not None], default=0)
-        if (now_ts - newest_event_time) < 1800:
-            print(f"--- INSTANT CACHE HIT: Serving {airport} from SQLite in <0.1s.", file=sys.stderr)
+        if (now_ts - newest_event_time) < 300:
             session["last_airport"] = airport
             session["minutes_back"] = minutes_back
             return jsonify({
@@ -118,7 +115,6 @@ def api_fetch():
                 "cached": True
             })
 
-    # If cache is old/empty, try fetching live
     dep_begin = now_ts - (minutes_back * 60)
     dep_rows = get_airport_departures(airport, dep_begin, now_ts)
     
@@ -127,7 +123,7 @@ def api_fetch():
         add_flight(
             icao24=d.get("icao24"),
             callsign=d.get("callsign"),
-            dep_airport=d.get("estDepartureAirport"),
+            dep_airport=d.get("estDepartureAirport") or airport,
             arr_airport=d.get("estArrivalAirport"),
             dep_time=str(d.get("firstSeen")),
             delay_minutes=None,
@@ -136,7 +132,6 @@ def api_fetch():
         )
         saved_dep += 1
 
-    # Refresh existing flights reference after saving live rows
     if saved_dep == 0:
         existing_flights, _ = get_flights_for_last_search(
             airport=airport, 
@@ -153,7 +148,7 @@ def api_fetch():
 
 @bp.route("/api/flow")
 def api_flow():
-    airport = airport = _to_icao(request.args.get("airport") or "KJFK")
+    airport = _to_icao(request.args.get("airport") or "KDCA")
     coords = get_airport_coordinates(airport)
     flows = get_flow_states(airport)
     return jsonify({
@@ -163,8 +158,8 @@ def api_flow():
 
 @bp.route("/flow")
 def flow_map():
-    default_airport = os.getenv("DEFAULT_AIRPORT","KDCA")
-    airport = _to_icao(request.args.get("airport", default_airport))
+    default_airport = os.getenv("DEFAULT_AIRPORT", "KDCA")
+    airport = _to_icao(request.args.get("airport", session.get("last_airport", default_airport)))
     coords = get_airport_coordinates(airport) or (38.8512, -77.0402)
     return render_template("flow.html", airport=airport, icao24_list="", initial_lat=coords[0], initial_lon=coords[1])
 

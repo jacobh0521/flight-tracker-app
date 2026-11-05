@@ -8,25 +8,142 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
   <style>
-    body, html { margin:0; padding:0; height:100%; }
-    #map { width:100%; height:90vh; }
-    #controls { padding: 10px; }
-
-    .legend {
-      background: white;
-      line-height: 18px;
-      color: #555;
-      padding: 6px 8px;
-      border-radius: 5px;
-      box-shadow: 0 0 15px rgba(0,0,0,0.2);
+    body, html {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #f7f9fb;
     }
-    .legend h4 { margin: 0 0 5px 0; font-size: 14px; }
+    #controls {
+      height: 8vh;
+      min-height: 52px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #ffffff;
+      border-bottom: 1px solid #e1e5ea;
+      box-sizing: border-box;
+    }
+    #controls label {
+      font-weight: 600;
+      font-size: 14px;
+      color: #374151;
+    }
+    #airportInput {
+      padding: 6px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 14px;
+      width: 90px;
+      text-transform: uppercase;
+    }
+    #loadBtn {
+      background-color: #0d6efd;
+      color: white;
+      border: none;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #loadBtn:hover {
+      background-color: #0b5ed7;
+    }
+    #backLink {
+      color: #0d6efd;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 14px;
+      margin-left: 8px;
+    }
+    #backLink:hover {
+      text-decoration: underline;
+    }
+    #pollStatus {
+      margin-left: auto;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    #map {
+      width: 100%;
+      height: 92vh;
+    }
+
+    /* Compass Control */
+    .compass-control {
+      background: rgba(255, 255, 255, 0.94);
+      width: 68px;
+      height: 68px;
+      border-radius: 50%;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.22);
+      border: 2px solid #cbd5e1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+    }
+
+    /* Legend Control */
+    .legend {
+      background: rgba(255, 255, 255, 0.96);
+      line-height: 18px;
+      color: #333;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+      border: 1px solid #e2e8f0;
+      font-size: 12px;
+      min-width: 170px;
+    }
+    .legend h4 {
+      margin: 0 0 8px 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: #1f2937;
+      border-bottom: 1px solid #e5e7eb;
+      padding-bottom: 4px;
+    }
     .legend-gradient {
-      width: 120px;
+      width: 100%;
       height: 12px;
-      background: linear-gradient(to right, blue, red);
-      margin-bottom: 5px;
-      border: 1px solid #ccc;
+      background: linear-gradient(to right, rgb(0,0,255), rgb(128,0,128), rgb(255,0,0));
+      margin-bottom: 4px;
+      border-radius: 3px;
+      border: 1px solid #9ca3af;
+    }
+    .legend-scale {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #4b5563;
+      margin-bottom: 10px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      font-size: 12px;
+      color: #374151;
+    }
+    .legend-circle {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: rgb(128, 0, 128);
+      border: 1.5px solid #000;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .legend-line {
+      width: 16px;
+      height: 2px;
+      background: #000;
+      display: inline-block;
+      flex-shrink: 0;
     }
   </style>
 </head>
@@ -34,10 +151,11 @@
 <body>
 
 <div id="controls">
-  <label>Airport ICAO:</label>
+  <label for="airportInput">Airport ICAO:</label>
   <input id="airportInput" value="{{ airport }}" onkeydown="if(event.key==='Enter') loadFlow(true)" />
-  <button onclick="loadFlow(true)">Load</button>
-  <a href="/">← Back to Dashboard</a>
+  <button id="loadBtn" onclick="loadFlow(true)">Load</button>
+  <a id="backLink" href="/">← Back to Dashboard</a>
+  <span id="pollStatus">Auto-updating every 20s</span>
 </div>
 
 <div id="map"></div>
@@ -49,44 +167,101 @@ let map;
 let markers = [];
 let headingLines = [];
 let pollInterval = null;
+let activeAbortController = null;
+
 const maxVel = 250;
+const STANDARD_RADIUS = 7; // Standardized circle size for all aircraft
+const POLL_INTERVAL_MS = 20000; // 20 seconds
 
 function initMap() {
-  const lat = parseFloat("{{ initial_lat }}" || "0");
-  const lon = parseFloat("{{ initial_lon }}" || "0");
-  map = L.map('map').setView([lat, lon], 11);
+  const lat = parseFloat("{{ initial_lat }}" || "38.8512");
+  const lon = parseFloat("{{ initial_lon }}" || "-77.0402");
+  map = L.map('map').setView([lat, lon], 10);
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
 
-  const legend = L.control({ position: 'topright' });
+  // 1. Add Compass Rose Control (Top-Right)
+  const compass = L.control({ position: 'topright' });
+  compass.onAdd = function () {
+    const div = L.DomUtil.create('div', 'compass-control');
+    div.title = 'Compass (North Up)';
+    div.innerHTML = `
+      <svg viewBox="0 0 100 100" width="58" height="58">
+        <circle cx="50" cy="50" r="44" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="50" y="17" text-anchor="middle" font-size="13" font-weight="bold" fill="#dc2626">N</text>
+        <text x="86" y="54" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">E</text>
+        <text x="50" y="92" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">S</text>
+        <text x="14" y="54" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">W</text>
+        <!-- North Red Pointer -->
+        <polygon points="50,21 43,50 57,50" fill="#dc2626"/>
+        <!-- South Dark Pointer -->
+        <polygon points="50,79 43,50 57,50" fill="#334155"/>
+        <circle cx="50" cy="50" r="3.5" fill="#ffffff" stroke="#1e293b" stroke-width="1.5"/>
+      </svg>
+    `;
+    return div;
+  };
+  compass.addTo(map);
+
+  // 2. Add Legend Control (Bottom-Right)
+  const legend = L.control({ position: 'bottomright' });
   legend.onAdd = function () {
     const div = L.DomUtil.create('div', 'legend');
     div.innerHTML = `
-      <h4>Velocity (m/s)</h4>
+      <h4>Map Legend</h4>
+      <div style="font-weight:600; margin-bottom:4px;">Velocity (m/s)</div>
       <div class="legend-gradient"></div>
-      <div style="display:flex;justify-content:space-between;">
-        <span>0</span><span>${maxVel}</span>
-      </div>`;
+      <div class="legend-scale">
+        <span>0 m/s</span>
+        <span>125 m/s</span>
+        <span>250+ m/s</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-circle"></span>
+        <span>Aircraft Position</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-line"></span>
+        <span>Heading Vector</span>
+      </div>
+    `;
     return div;
   };
   legend.addTo(map);
 }
 
 function velocityStyle(v) {
-  const radius = Math.max(5, Math.min(20, 5 + (v / maxVel) * 15));
-  const r = Math.min(255, Math.round((v / maxVel) * 255));
+  const clamped = Math.max(0, Math.min(maxVel, v || 0));
+  const r = Math.min(255, Math.round((clamped / maxVel) * 255));
   const b = Math.max(0, 255 - r);
-  return { radius, color: `rgb(${r},0,${b})` };
+  return {
+    radius: STANDARD_RADIUS,
+    color: `rgb(${r}, 0, ${b})`
+  };
 }
 
 function loadFlow(centerMap = false) {
-  if (document.hidden) return; // Skip polling if tab is in background
+  // Only update while someone is actively viewing the page
+  if (document.hidden) return;
 
-  const airport = document.getElementById("airportInput").value.trim().toUpperCase();
+  const airportInput = document.getElementById("airportInput");
+  const statusEl = document.getElementById("pollStatus");
+  const airport = (airportInput.value || "KDCA").trim().toUpperCase();
 
-  fetch(`/api/flow?airport=${airport}`)
+  // Cancel any previous unfinished request so it never blocks navigation
+  if (activeAbortController) {
+    activeAbortController.abort();
+  }
+  activeAbortController = new AbortController();
+
+  statusEl.textContent = `Updating ${airport}...`;
+
+  fetch(`/api/flow?airport=${encodeURIComponent(airport)}`, {
+    signal: activeAbortController.signal
+  })
     .then(res => res.json())
     .then(data => {
       const states = data.states || [];
@@ -97,13 +272,16 @@ function loadFlow(centerMap = false) {
       headingLines = [];
 
       if (centerMap && data.center) {
-        map.setView([data.center.lat, data.center.lon], 11);
+        map.setView([data.center.lat, data.center.lon], 10);
       }
+
+      const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      statusEl.textContent = `${states.length} aircraft • Last updated ${nowStr} (20s refresh)`;
 
       if (!states.length) return;
 
       states.forEach(f => {
-        if (!f.lat || !f.lon) return;
+        if (f.lat == null || f.lon == null) return;
 
         const style = velocityStyle(f.velocity || 0);
 
@@ -111,25 +289,27 @@ function loadFlow(centerMap = false) {
           radius: style.radius,
           fillColor: style.color,
           color: "#000",
-          weight: 1,
-          fillOpacity: 0.7
+          weight: 1.5,
+          fillOpacity: 0.85
         }).addTo(map);
 
         marker.bindPopup(`
           <b>${f.callsign || f.icao24}</b><br>
-          Speed: ${Math.round(f.velocity || 0)} m/s
+          ICAO24: ${f.icao24}<br>
+          Speed: ${Math.round(f.velocity || 0)} m/s<br>
+          Heading: ${f.heading != null ? Math.round(f.heading) + '°' : 'N/A'}
         `);
 
         markers.push(marker);
 
         if (typeof f.heading === "number") {
-          const len = 0.02;
-          const rad = f.heading * Math.PI / 180;
+          const len = 0.022;
+          const rad = (f.heading * Math.PI) / 180;
           const endLat = f.lat + len * Math.cos(rad);
           const endLon = f.lon + len * Math.sin(rad);
 
           const line = L.polyline([[f.lat, f.lon], [endLat, endLon]], {
-            color: "black",
+            color: "#111827",
             weight: 2
           }).addTo(map);
 
@@ -138,24 +318,41 @@ function loadFlow(centerMap = false) {
       });
     })
     .catch(err => {
-      console.error(err);
+      if (err.name !== "AbortError") {
+        console.error("Flow fetch error:", err);
+        statusEl.textContent = "Update paused (retrying in 20s)";
+      }
     });
 }
 
-window.onload = () => {
-  initMap();
-  loadFlow(true);
-
+function startPolling() {
+  if (pollInterval) clearInterval(pollInterval);
   pollInterval = setInterval(() => {
-    loadFlow(false);
-  }, 30000);
-
-  document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       loadFlow(false);
     }
+  }, POLL_INTERVAL_MS);
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  initMap();
+  loadFlow(true);
+  startPolling();
+
+  // Immediately refresh and resume 20s timer when user returns to the tab
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      loadFlow(false);
+      startPolling();
+    }
   });
-};
+
+  // Abort any pending fetch immediately when clicking "Back to Dashboard" so page navigation never hangs
+  window.addEventListener("beforeunload", () => {
+    if (pollInterval) clearInterval(pollInterval);
+    if (activeAbortController) activeAbortController.abort();
+  });
+});
 </script>
 
 </body>
