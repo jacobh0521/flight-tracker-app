@@ -30,21 +30,18 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Fast 2.5s connect timeout so single-worker Gunicorn never blocks navigation
 CONNECT_TIMEOUT_SEC = 2.5
 READ_TIMEOUT_SEC = 4.0
 
 _ACCESS_TOKEN: Optional[str] = None
 _TOKEN_EXPIRES_AT: float = 0.0
-
-# Circuit breaker: if OpenSky blocks our Cloud IP (ConnectTimeout), skip OpenSky for 10 minutes
 _OPENSKY_UNREACHABLE_UNTIL: float = 0.0
 
 # ----------------------------
 # Rate Limiting Configuration
 # ----------------------------
-LAST_REQUEST_TIME = 0.0
-MIN_INTERVAL_SEC = 1.0  # Keep minimal interval so web requests never sleep for 10s
+_LAST_REQUEST_TIME = 0.0
+MIN_INTERVAL_SEC = 1.0
 
 DAILY_LIMIT = 4000
 USAGE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "usage_tracker.json"))
@@ -135,11 +132,9 @@ def _get_oauth_token(force_refresh: bool = False) -> Optional[str]:
         _TOKEN_EXPIRES_AT = now + expires_in
         return _ACCESS_TOKEN
     except requests.exceptions.ConnectTimeout:
-        print("--- OPENSKY CIRCUIT BREAKER: OAuth timed out on Cloud IP. Pausing OpenSky for 10m.", file=sys.stderr)
         _OPENSKY_UNREACHABLE_UNTIL = time.time() + 600
         return None
-    except Exception as e:
-        print(f"--- OPENSKY OAUTH ERROR: {e}", file=sys.stderr)
+    except Exception:
         return None
 
 
@@ -187,16 +182,14 @@ def _make_request(
             return data.get("states") or []
         return data
     except requests.exceptions.ConnectTimeout:
-        print(f"--- OPENSKY CIRCUIT BREAKER: {endpoint} timed out on Cloud IP. Pausing OpenSky for 10m.", file=sys.stderr)
         _OPENSKY_UNREACHABLE_UNTIL = time.time() + 600
         return None
-    except Exception as e:
-        print(f"--- OPENSKY REQ ERROR ({endpoint}): {e}", file=sys.stderr)
+    except Exception:
         return None
 
 
 def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dict]:
-    """Fallback 1: Fetch recent departures from AviationStack when OpenSky blocks cloud IPs."""
+    """Fallback 1: Fetch real recent departures from AviationStack (skipping codeshare duplicates)."""
     if not AVIATIONSTACK_KEY:
         return []
     try:
@@ -204,7 +197,7 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
         params = {
             "access_key": AVIATIONSTACK_KEY,
             "dep_icao": icao.upper(),
-            "limit": 25,
+            "limit": 50,
         }
         resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=4.0)
         resp.raise_for_status()
@@ -212,10 +205,13 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
         flights = payload.get("data") or []
 
         results: List[Dict] = []
-        now_ts = int(time.time())
-        window = max(end - begin, 1800)
+        seen_icao24 = set()
 
         for idx, f in enumerate(flights):
+            # Skip codeshares to eliminate duplicate rows for the same physical plane
+            if f.get("codeshared") is not None:
+                continue
+
             flight_info = f.get("flight") or {}
             dep_info = f.get("departure") or {}
             arr_info = f.get("arrival") or {}
@@ -223,7 +219,6 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
 
             callsign = (
                 flight_info.get("icao")
-                or flight_info.get("iata")
                 or flight_info.get("number")
                 or ""
             ).strip()
@@ -231,25 +226,27 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
                 continue
 
             icao24 = (aircraft_info.get("icao24") or f"as{idx:04x}").strip().lower()
+            if icao24 in seen_icao24:
+                continue
+            seen_icao24.add(icao24)
 
+            # ONLY use real reported timestamps from API. Never generate fake time.
             ts_str = (
                 dep_info.get("actual")
                 or dep_info.get("estimated")
                 or dep_info.get("scheduled")
             )
-            seen_ts = None
-            if ts_str:
-                try:
-                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    cand_ts = int(dt.timestamp())
-                    if begin <= cand_ts <= end:
-                        seen_ts = cand_ts
-                except Exception:
-                    pass
+            if not ts_str:
+                continue
 
-            if seen_ts is None:
-                step = max(60, window // max(len(flights), 1))
-                seen_ts = max(begin + 30, now_ts - (idx * step) % window)
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                seen_ts = int(dt.timestamp())
+                # Must be strictly within the requested lookback window
+                if not (begin <= seen_ts <= end):
+                    continue
+            except Exception:
+                continue
 
             results.append(
                 {
@@ -261,55 +258,22 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
                     "lastSeen": seen_ts,
                 }
             )
-            if len(results) >= 12:
+            if len(results) >= 20:
                 break
 
-        if results:
-            print(f"--- AVIATIONSTACK FALLBACK: Loaded {len(results)} departures for {icao}.", file=sys.stderr)
         return results
-    except Exception as e:
-        print(f"--- AVIATIONSTACK ERROR: {e}", file=sys.stderr)
+    except Exception:
         return []
-
-
-def _derive_departures_from_flow(icao: str, begin: int, end: int) -> List[Dict]:
-    """Fallback 2: Synthesize departures from active ADS-B flow states near the airport."""
-    states = get_flow_states(icao)
-    if not states:
-        return []
-
-    now_ts = int(time.time())
-    window = max(end - begin, 1800)
-    airborne = [s for s in states if (s.get("velocity") or 0) > 25 and s.get("callsign")]
-    selected = (airborne or states)[:10]
-
-    derived: List[Dict] = []
-    step = max(90, window // max(len(selected), 1))
-    for idx, s in enumerate(selected):
-        seen_ts = max(begin + 30, now_ts - (idx * step) % window)
-        derived.append(
-            {
-                "icao24": s.get("icao24") or f"fl{idx:04x}",
-                "callsign": (s.get("callsign") or "UNKN").strip(),
-                "estDepartureAirport": icao.upper(),
-                "estArrivalAirport": None,
-                "firstSeen": seen_ts,
-                "lastSeen": seen_ts,
-            }
-        )
-    return derived
 
 
 def get_airport_departures(icao: str, begin: int, end: int) -> List[Dict]:
+    # 1. Try OpenSky live departures first
     result = _make_request("/api/flights/departure", {"airport": icao, "begin": begin, "end": end})
     if result:
         return result  # type: ignore
 
-    as_result = _fetch_aviationstack_departures(icao, begin, end)
-    if as_result:
-        return as_result
-
-    return _derive_departures_from_flow(icao, begin, end)
+    # 2. Fallback to AviationStack (no synthetic fake timestamps)
+    return _fetch_aviationstack_departures(icao, begin, end)
 
 
 def get_airport_arrivals(icao: str, begin: int, end: int) -> List[Dict]:
@@ -318,48 +282,80 @@ def get_airport_arrivals(icao: str, begin: int, end: int) -> List[Dict]:
 
 
 def get_flow_states(airport_icao: str) -> List[Dict]:
-    bbox = get_airport_bbox_flow(airport_icao)
-    if not bbox:
-        return []
-
-    # 1. Check fresh SQLite cache (18s TTL so 20s map polling always gets fresh updates)
-    cached_flows = get_cached_flow_states(airport_icao, max_age_sec=18)
+    # 1. Check fresh SQLite cache (15s TTL for real-time smoothness)
+    cached_flows = get_cached_flow_states(airport_icao, max_age_sec=15)
     if cached_flows:
         return cached_flows
 
-    # 2. Query OpenSky live bounding-box states
-    lamin, lamax, lomin, lomax = bbox
-    data = _make_request(
-        "/api/states/all",
-        {"lamin": lamin, "lamax": lamax, "lomin": lomin, "lomax": lomax},
-    )
+    coords = get_airport_coordinates(airport_icao)
+    if not coords:
+        return []
 
+    lat, lon = coords
     flows: List[Dict] = []
-    if data:
-        for s in data:
-            try:
-                if s[6] is None or s[5] is None:
+
+    # 2. Try OpenSky bounding-box states first
+    bbox = get_airport_bbox_flow(airport_icao)
+    if bbox:
+        lamin, lamax, lomin, lomax = bbox
+        data = _make_request(
+            "/api/states/all",
+            {"lamin": lamin, "lamax": lamax, "lomin": lomin, "lomax": lomax},
+        )
+        if data:
+            for s in data:
+                try:
+                    if s[6] is None or s[5] is None:
+                        continue
+                    flows.append(
+                        {
+                            "lat": float(s[6]),
+                            "lon": float(s[5]),
+                            "heading": s[10],
+                            "velocity": s[9],
+                            "icao24": str(s[0]).strip(),
+                            "callsign": str(s[1] or "").strip(),
+                            "source": "opensky",
+                        }
+                    )
+                except Exception:
+                    continue
+
+    # 3. IF OpenSky is blocked/unreachable, use airplanes.live v2 point endpoint (never blocked by cloud IPs)
+    if not flows:
+        try:
+            url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/40"
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=4.0)
+            resp.raise_for_status()
+            payload = resp.json()
+            ac_list = payload.get("ac") or []
+            for ac in ac_list:
+                lat_val = ac.get("lat")
+                lon_val = ac.get("lon")
+                if lat_val is None or lon_val is None:
                     continue
                 flows.append(
                     {
-                        "lat": float(s[6]),
-                        "lon": float(s[5]),
-                        "heading": s[10],
-                        "velocity": s[9],
-                        "icao24": str(s[0]).strip(),
-                        "callsign": str(s[1] or "").strip(),
-                        "source": "opensky",
+                        "lat": float(lat_val),
+                        "lon": float(lon_val),
+                        "heading": ac.get("track"),
+                        "velocity": ac.get("gs"),  # Ground speed in knots, map handles scaling
+                        "icao24": str(ac.get("hex") or "").strip().lower(),
+                        "callsign": str(ac.get("flight") or "").strip(),
+                        "source": "airplanes.live",
                     }
                 )
-            except Exception:
-                continue
+            if flows:
+                print(f"--- AIRPLANES.LIVE FALLBACK: Loaded {len(flows)} live aircraft for {airport_icao}.", file=sys.stderr)
+        except Exception as e:
+            print(f"--- AIRPLANES.LIVE ERROR: {e}", file=sys.stderr)
 
     if flows:
         save_cached_flow_states(airport_icao, flows)
         return flows
 
-    # 3. If OpenSky blocked the cloud IP, serve existing SQLite cache immediately
-    stale_cache = get_cached_flow_states(airport_icao, max_age_sec=86400 * 30)
+    # 4. Final fallback to SQLite stale cache
+    stale_cache = get_cached_flow_states(airport_icao, max_age_sec=86400 * 7)
     if stale_cache:
         return stale_cache
 

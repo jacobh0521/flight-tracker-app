@@ -24,15 +24,10 @@ DB_NAME = os.getenv("DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__fi
 def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_NAME)
 
-def _column_names(cur) -> List[str]:
-    cur.execute("PRAGMA table_info(flights)")
-    return [row[1] for row in cur.fetchall()]
-
 def init_db() -> None:
     conn = _connect()
     cur = conn.cursor()
 
-    # 1. Base table creation (ensures table exists)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS flights (
@@ -41,16 +36,14 @@ def init_db() -> None:
             callsign TEXT,
             departure_airport TEXT,
             arrival_airport TEXT,
-            departure_time INTEGER, -- The timestamp reported by OpenSky/ADS-B
+            departure_time INTEGER,
             delay_minutes INTEGER,
-            flight_kind TEXT NOT NULL, -- 'DEP' or 'ARR'
-            event_time INTEGER NOT NULL, -- The time this record was saved
-            UNIQUE(icao24, event_time, flight_kind) ON CONFLICT REPLACE
+            flight_kind TEXT NOT NULL,
+            event_time INTEGER NOT NULL
         )
         """
     )
     
-    # --- Flow Cache Table for Persistent Map Caching ---
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS flow_cache (
@@ -61,7 +54,6 @@ def init_db() -> None:
         """
     )
 
-    # 2. Add Index for faster lookup by event_time and airport
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_flight_search ON flights (
@@ -76,7 +68,6 @@ def init_db() -> None:
 
 
 def get_cached_flow_states(airport: str, max_age_sec: int = 86400) -> Optional[List[Dict]]:
-    """Retrieves cached live flight states from SQLite."""
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
@@ -101,7 +92,6 @@ def get_cached_flow_states(airport: str, max_age_sec: int = 86400) -> Optional[L
 
 
 def save_cached_flow_states(airport: str, states: List[Dict]) -> None:
-    """Saves live flight states snapshot to SQLite cache."""
     conn = _connect()
     cur = conn.cursor()
     now = int(time.time())
@@ -169,25 +159,6 @@ def get_flights_for_last_search(
     return rows, summary_rows
 
 
-def get_destination_by_icao24(icao24: str) -> Optional[Dict]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT arrival_airport
-        FROM flights
-        WHERE icao24 = ? 
-        AND arrival_airport IS NOT NULL 
-        ORDER BY event_time DESC
-        LIMIT 1
-        """,
-        (icao24,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return {"arrival_airport": row[0]} if row else None
-
-
 def add_flight(
     icao24: str,
     callsign: Optional[str],
@@ -204,22 +175,39 @@ def add_flight(
         dep_time_int = int(dep_time)
         event_time_int = int(event_time)
     except (TypeError, ValueError):
-        print(f"ERROR: Invalid time format for flight {icao24}. Skipping.", file=sys.stderr)
         conn.close()
         return
 
+    # STRICT DEDUPLICATION: Check if this icao24 + flight_kind was recorded within the last 12 hours
     cur.execute(
-        "SELECT id FROM flights WHERE icao24 = ? AND event_time = ? AND flight_kind = ?",
-        (icao24, event_time_int, flight_kind)
+        """
+        SELECT id FROM flights 
+        WHERE icao24 = ? 
+        AND flight_kind = ? 
+        AND ABS(event_time - ?) < 43200
+        LIMIT 1
+        """,
+        (icao24, flight_kind, event_time_int)
     )
-    existing_row = cur.fetchone()
-    if existing_row:
-        if callsign:
-            cur.execute("UPDATE flights SET callsign = ? WHERE id = ?", (callsign, existing_row[0]))
-            conn.commit()
+    existing = cur.fetchone()
+
+    if existing:
+        # Update callsign or airports if missing
+        cur.execute(
+            """
+            UPDATE flights 
+            SET callsign = COALESCE(NULLIF(?, ''), callsign),
+                departure_airport = COALESCE(NULLIF(?, ''), departure_airport),
+                arrival_airport = COALESCE(NULLIF(?, ''), arrival_airport)
+            WHERE id = ?
+            """,
+            (callsign, dep_airport, arr_airport, existing[0])
+        )
+        conn.commit()
         conn.close()
         return
 
+    # Insert clean new unique row
     cur.execute(
         """
         INSERT INTO flights (
@@ -240,57 +228,3 @@ def add_flight(
     )
     conn.commit()
     conn.close()
-
-
-def get_icao24_types() -> Dict[str, str]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT icao24, callsign
-        FROM flights
-        WHERE callsign IS NOT NULL AND callsign != ''
-        GROUP BY icao24
-        HAVING MAX(event_time)
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
-    
-    icao24_types = {}
-    for icao24, callsign in rows:
-        type_code = (callsign or "").strip().upper()
-        if type_code:
-            icao24_types[icao24] = type_code[:3]
-
-    return icao24_types
-
-
-def update_flight_callsigns(flight_list: List[Dict]):
-    conn = _connect()
-    cur = conn.cursor()
-
-    updates = 0
-    for flight in flight_list:
-        icao24 = flight.get("icao24")
-        new_callsign = flight.get("callsign")
-        new_dep_time = flight.get("firstSeen")
-        new_event_time = flight.get("lastSeen")
-
-        if icao24 and new_callsign:
-            cur.execute(
-                """
-                UPDATE flights
-                SET 
-                    callsign = ?,
-                    departure_time = COALESCE(departure_time, ?),
-                    event_time = ?
-                WHERE icao24 = ? AND callsign IS NULL
-                """,
-                (new_callsign, new_dep_time, new_event_time, icao24)
-            )
-            updates += cur.rowcount
-    
-    conn.commit()
-    conn.close()
-    return updates
