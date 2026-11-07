@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Live Flow Map</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
@@ -11,43 +11,52 @@
     body, html {
       margin: 0;
       padding: 0;
-      height: 100%;
+      width: 100%;
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background-color: #f7f9fb;
     }
+
     #controls {
-      height: 8vh;
-      min-height: 52px;
-      padding: 0 16px;
+      padding: 8px 12px;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 12px;
+      gap: 8px 10px;
       background: #ffffff;
       border-bottom: 1px solid #e1e5ea;
       box-sizing: border-box;
+      flex-shrink: 0;
+      z-index: 1000;
     }
     #controls label {
       font-weight: 600;
       font-size: 14px;
       color: #374151;
+      white-space: nowrap;
     }
     #airportInput {
-      padding: 6px 10px;
+      padding: 6px 8px;
       border: 1px solid #cbd5e1;
       border-radius: 6px;
       font-size: 14px;
-      width: 90px;
+      width: 76px;
       text-transform: uppercase;
     }
     #loadBtn {
       background-color: #0d6efd;
       color: white;
       border: none;
-      padding: 7px 14px;
+      padding: 6px 12px;
       border-radius: 6px;
       font-weight: 600;
       font-size: 14px;
       cursor: pointer;
+      white-space: nowrap;
     }
     #loadBtn:hover {
       background-color: #0b5ed7;
@@ -57,7 +66,8 @@
       text-decoration: none;
       font-weight: 600;
       font-size: 14px;
-      margin-left: 8px;
+      margin-left: 4px;
+      white-space: nowrap;
     }
     #backLink:hover {
       text-decoration: underline;
@@ -66,17 +76,20 @@
       margin-left: auto;
       font-size: 12px;
       color: #6b7280;
+      white-space: nowrap;
     }
+
     #map {
       width: 100%;
-      height: 92vh;
+      flex: 1;
+      min-height: 0;
     }
 
     /* Compass Control */
     .compass-control {
       background: rgba(255, 255, 255, 0.94);
-      width: 68px;
-      height: 68px;
+      width: 64px;
+      height: 64px;
       border-radius: 50%;
       box-shadow: 0 2px 10px rgba(0,0,0,0.22);
       border: 2px solid #cbd5e1;
@@ -89,17 +102,20 @@
     /* Legend Control */
     .legend {
       background: rgba(255, 255, 255, 0.96);
-      line-height: 18px;
+      line-height: 1.35;
       color: #333;
-      padding: 12px 14px;
+      padding: 10px 12px;
       border-radius: 8px;
       box-shadow: 0 2px 12px rgba(0,0,0,0.2);
       border: 1px solid #e2e8f0;
       font-size: 12px;
-      min-width: 170px;
+      min-width: 155px;
+      max-width: calc(100vw - 24px);
+      box-sizing: border-box;
+      margin-bottom: env(safe-area-inset-bottom, 8px) !important;
     }
     .legend h4 {
-      margin: 0 0 8px 0;
+      margin: 0 0 6px 0;
       font-size: 13px;
       font-weight: 700;
       color: #1f2937;
@@ -108,7 +124,7 @@
     }
     .legend-gradient {
       width: 100%;
-      height: 12px;
+      height: 10px;
       background: linear-gradient(to right, rgb(0,0,255), rgb(128,0,128), rgb(255,0,0));
       margin-bottom: 4px;
       border-radius: 3px;
@@ -117,21 +133,21 @@
     .legend-scale {
       display: flex;
       justify-content: space-between;
-      font-size: 11px;
+      font-size: 10px;
       color: #4b5563;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .legend-item {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-top: 6px;
-      font-size: 12px;
+      margin-top: 5px;
+      font-size: 11px;
       color: #374151;
     }
     .legend-circle {
-      width: 12px;
-      height: 12px;
+      width: 11px;
+      height: 11px;
       border-radius: 50%;
       background: rgb(128, 0, 128);
       border: 1.5px solid #000;
@@ -139,11 +155,63 @@
       flex-shrink: 0;
     }
     .legend-line {
-      width: 16px;
+      width: 14px;
       height: 2px;
       background: #000;
       display: inline-block;
       flex-shrink: 0;
+    }
+
+    @media (max-width: 640px) {
+      #controls {
+        padding: 8px 10px;
+        gap: 6px 8px;
+      }
+      #controls label {
+        font-size: 13px;
+      }
+      #airportInput {
+        width: 64px;
+        font-size: 13px;
+        padding: 5px 6px;
+      }
+      #loadBtn {
+        font-size: 13px;
+        padding: 5px 10px;
+      }
+      #backLink {
+        font-size: 13px;
+        margin-left: auto;
+      }
+      #pollStatus {
+        width: 100%;
+        margin-left: 0;
+        font-size: 11px;
+        padding-top: 4px;
+        border-top: 1px solid #f1f5f9;
+        white-space: normal;
+      }
+      .compass-control {
+        width: 48px;
+        height: 48px;
+        margin-top: 8px !important;
+        margin-right: 8px !important;
+      }
+      .compass-control svg {
+        width: 42px;
+        height: 42px;
+      }
+      .legend {
+        padding: 8px 10px;
+        min-width: 135px;
+        font-size: 11px;
+        margin-right: 8px !important;
+        margin-bottom: max(12px, env(safe-area-inset-bottom, 12px)) !important;
+      }
+      .legend h4 {
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
     }
   </style>
 </head>
@@ -151,10 +219,10 @@
 <body>
 
 <div id="controls">
-  <label for="airportInput">Airport ICAO:</label>
+  <label for="airportInput">ICAO:</label>
   <input id="airportInput" value="{{ airport }}" onkeydown="if(event.key==='Enter') loadFlow(true)" />
   <button id="loadBtn" onclick="loadFlow(true)">Load</button>
-  <a id="backLink" href="/">← Back to Dashboard</a>
+  <a id="backLink" href="/">← Dashboard</a>
   <span id="pollStatus">Auto-updating every 20s</span>
 </div>
 
@@ -170,8 +238,8 @@ let pollInterval = null;
 let activeAbortController = null;
 
 const maxVel = 250;
-const STANDARD_RADIUS = 7; // Standardized circle size for all aircraft
-const POLL_INTERVAL_MS = 20000; // 20 seconds
+const STANDARD_RADIUS = 7;
+const POLL_INTERVAL_MS = 20000;
 
 function initMap() {
   const lat = parseFloat("{{ initial_lat }}" || "38.8512");
@@ -180,24 +248,21 @@ function initMap() {
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap contributors'
+    attribution: '&copy; OSM'
   }).addTo(map);
 
-  // 1. Add Compass Rose Control (Top-Right)
   const compass = L.control({ position: 'topright' });
   compass.onAdd = function () {
     const div = L.DomUtil.create('div', 'compass-control');
     div.title = 'Compass (North Up)';
     div.innerHTML = `
-      <svg viewBox="0 0 100 100" width="58" height="58">
+      <svg viewBox="0 0 100 100" width="54" height="54">
         <circle cx="50" cy="50" r="44" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
         <text x="50" y="17" text-anchor="middle" font-size="13" font-weight="bold" fill="#dc2626">N</text>
         <text x="86" y="54" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">E</text>
         <text x="50" y="92" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">S</text>
         <text x="14" y="54" text-anchor="middle" font-size="11" font-weight="bold" fill="#475569">W</text>
-        <!-- North Red Pointer -->
         <polygon points="50,21 43,50 57,50" fill="#dc2626"/>
-        <!-- South Dark Pointer -->
         <polygon points="50,79 43,50 57,50" fill="#334155"/>
         <circle cx="50" cy="50" r="3.5" fill="#ffffff" stroke="#1e293b" stroke-width="1.5"/>
       </svg>
@@ -206,18 +271,17 @@ function initMap() {
   };
   compass.addTo(map);
 
-  // 2. Add Legend Control (Bottom-Right)
   const legend = L.control({ position: 'bottomright' });
   legend.onAdd = function () {
     const div = L.DomUtil.create('div', 'legend');
     div.innerHTML = `
       <h4>Map Legend</h4>
-      <div style="font-weight:600; margin-bottom:4px;">Velocity (m/s)</div>
+      <div style="font-weight:600; margin-bottom:3px;">Velocity (m/s)</div>
       <div class="legend-gradient"></div>
       <div class="legend-scale">
-        <span>0 m/s</span>
-        <span>125 m/s</span>
-        <span>250+ m/s</span>
+        <span>0</span>
+        <span>125</span>
+        <span>250+</span>
       </div>
       <div class="legend-item">
         <span class="legend-circle"></span>
@@ -231,6 +295,10 @@ function initMap() {
     return div;
   };
   legend.addTo(map);
+
+  window.addEventListener('resize', () => {
+    map.invalidateSize();
+  });
 }
 
 function velocityStyle(v) {
@@ -244,14 +312,12 @@ function velocityStyle(v) {
 }
 
 function loadFlow(centerMap = false) {
-  // Only update while someone is actively viewing the page
   if (document.hidden) return;
 
   const airportInput = document.getElementById("airportInput");
   const statusEl = document.getElementById("pollStatus");
   const airport = (airportInput.value || "KDCA").trim().toUpperCase();
 
-  // Cancel any previous unfinished request so it never blocks navigation
   if (activeAbortController) {
     activeAbortController.abort();
   }
@@ -259,8 +325,9 @@ function loadFlow(centerMap = false) {
 
   statusEl.textContent = `Updating ${airport}...`;
 
-  fetch(`/api/flow?airport=${encodeURIComponent(airport)}`, {
-    signal: activeAbortController.signal
+  fetch(`/api/flow?airport=${encodeURIComponent(airport)}&_t=${Date.now()}`, {
+    signal: activeAbortController.signal,
+    cache: "no-store"
   })
     .then(res => res.json())
     .then(data => {
@@ -276,7 +343,8 @@ function loadFlow(centerMap = false) {
       }
 
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      statusEl.textContent = `${states.length} aircraft • Last updated ${nowStr} (20s refresh)`;
+      const src = states.length && states[0].source ? ` via ${states[0].source}` : "";
+      statusEl.textContent = `${states.length} aircraft${src} • ${nowStr} (20s)`;
 
       if (!states.length) return;
 
@@ -297,7 +365,8 @@ function loadFlow(centerMap = false) {
           <b>${f.callsign || f.icao24}</b><br>
           ICAO24: ${f.icao24}<br>
           Speed: ${Math.round(f.velocity || 0)} m/s<br>
-          Heading: ${f.heading != null ? Math.round(f.heading) + '°' : 'N/A'}
+          Heading: ${f.heading != null ? Math.round(f.heading) + '°' : 'N/A'}<br>
+          Source: ${f.source || 'live'}
         `);
 
         markers.push(marker);
@@ -336,10 +405,10 @@ function startPolling() {
 
 window.addEventListener("DOMContentLoaded", () => {
   initMap();
+  setTimeout(() => map.invalidateSize(), 150);
   loadFlow(true);
   startPolling();
 
-  // Immediately refresh and resume 20s timer when user returns to the tab
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       loadFlow(false);
@@ -347,7 +416,6 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Abort any pending fetch immediately when clicking "Back to Dashboard" so page navigation never hangs
   window.addEventListener("beforeunload", () => {
     if (pollInterval) clearInterval(pollInterval);
     if (activeAbortController) activeAbortController.abort();

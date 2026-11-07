@@ -30,8 +30,8 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-CONNECT_TIMEOUT_SEC = 2.5
-READ_TIMEOUT_SEC = 4.0
+CONNECT_TIMEOUT_SEC = 2.0
+READ_TIMEOUT_SEC = 3.5
 
 _ACCESS_TOKEN: Optional[str] = None
 _TOKEN_EXPIRES_AT: float = 0.0
@@ -131,10 +131,8 @@ def _get_oauth_token(force_refresh: bool = False) -> Optional[str]:
         expires_in = int(token_data.get("expires_in", 1800))
         _TOKEN_EXPIRES_AT = now + expires_in
         return _ACCESS_TOKEN
-    except requests.exceptions.ConnectTimeout:
-        _OPENSKY_UNREACHABLE_UNTIL = time.time() + 600
-        return None
     except Exception:
+        _OPENSKY_UNREACHABLE_UNTIL = time.time() + 600
         return None
 
 
@@ -181,15 +179,14 @@ def _make_request(
         if endpoint == "/api/states/all":
             return data.get("states") or []
         return data
-    except requests.exceptions.ConnectTimeout:
+    except Exception as e:
+        print(f"--- OPENSKY UNREACHABLE ({endpoint}): {e}", file=sys.stderr)
         _OPENSKY_UNREACHABLE_UNTIL = time.time() + 600
-        return None
-    except Exception:
         return None
 
 
 def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dict]:
-    """Fallback 1: Fetch real recent departures from AviationStack (skipping codeshare duplicates)."""
+    """Fetch real recent departures from AviationStack (skipping codeshare duplicates)."""
     if not AVIATIONSTACK_KEY:
         return []
     try:
@@ -208,7 +205,6 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
         seen_icao24 = set()
 
         for idx, f in enumerate(flights):
-            # Skip codeshares to eliminate duplicate rows for the same physical plane
             if f.get("codeshared") is not None:
                 continue
 
@@ -230,7 +226,6 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
                 continue
             seen_icao24.add(icao24)
 
-            # ONLY use real reported timestamps from API. Never generate fake time.
             ts_str = (
                 dep_info.get("actual")
                 or dep_info.get("estimated")
@@ -242,7 +237,6 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
             try:
                 dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                 seen_ts = int(dt.timestamp())
-                # Must be strictly within the requested lookback window
                 if not (begin <= seen_ts <= end):
                     continue
             except Exception:
@@ -267,12 +261,10 @@ def _fetch_aviationstack_departures(icao: str, begin: int, end: int) -> List[Dic
 
 
 def get_airport_departures(icao: str, begin: int, end: int) -> List[Dict]:
-    # 1. Try OpenSky live departures first
     result = _make_request("/api/flights/departure", {"airport": icao, "begin": begin, "end": end})
     if result:
         return result  # type: ignore
 
-    # 2. Fallback to AviationStack (no synthetic fake timestamps)
     return _fetch_aviationstack_departures(icao, begin, end)
 
 
@@ -281,9 +273,74 @@ def get_airport_arrivals(icao: str, begin: int, end: int) -> List[Dict]:
     return result if result is not None else []  # type: ignore
 
 
+def _fetch_adsb_v2_point(lat: float, lon: float, radius_nm: int = 40) -> List[Dict]:
+    """
+    Queries unblocked live ADS-B aggregators in order.
+    Converts ground speed (`gs`) from knots to m/s (* 0.514444) to match OpenSky units.
+    """
+    endpoints = [
+        ("adsb.lol", f"https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"),
+        ("airplanes.live", f"https://api.airplanes.live/v2/point/{lat}/{lon}/{radius_nm}"),
+        ("adsb.fi", f"https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"),
+    ]
+
+    for source_name, url in endpoints:
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                timeout=(2.5, 4.0),
+            )
+            if resp.status_code != 200:
+                print(f"--- {source_name} returned HTTP {resp.status_code}", file=sys.stderr)
+                continue
+
+            payload = resp.json()
+            # adsb.lol / airplanes.live use "ac", adsb.fi uses "aircraft" or "ac"
+            ac_list = payload.get("ac") if "ac" in payload else payload.get("aircraft", [])
+            if not ac_list:
+                continue
+
+            flows: List[Dict] = []
+            for ac in ac_list:
+                lat_val = ac.get("lat")
+                lon_val = ac.get("lon")
+                if lat_val is None or lon_val is None:
+                    continue
+
+                # Convert knots (gs) to m/s so map colors (0-250 m/s) are accurate
+                gs_knots = ac.get("gs")
+                vel_ms = round(float(gs_knots) * 0.514444, 2) if isinstance(gs_knots, (int, float)) else 0.0
+
+                heading = ac.get("track")
+                if not isinstance(heading, (int, float)):
+                    heading = ac.get("true_heading") or ac.get("mag_heading")
+
+                flows.append(
+                    {
+                        "lat": float(lat_val),
+                        "lon": float(lon_val),
+                        "heading": float(heading) if isinstance(heading, (int, float)) else None,
+                        "velocity": vel_ms,
+                        "icao24": str(ac.get("hex") or "").strip().lower(),
+                        "callsign": str(ac.get("flight") or "").strip(),
+                        "source": source_name,
+                    }
+                )
+
+            if flows:
+                print(f"--- LIVE FLOW ({source_name}): Returning {len(flows)} live aircraft.", file=sys.stderr)
+                return flows
+        except Exception as e:
+            print(f"--- {source_name} ERROR: {e}", file=sys.stderr)
+            continue
+
+    return []
+
+
 def get_flow_states(airport_icao: str) -> List[Dict]:
-    # 1. Check fresh SQLite cache (15s TTL for real-time smoothness)
-    cached_flows = get_cached_flow_states(airport_icao, max_age_sec=15)
+    # 1. Only serve SQLite cache if it is < 10 seconds old (prevents duplicate hits within same poll window)
+    cached_flows = get_cached_flow_states(airport_icao, max_age_sec=10)
     if cached_flows:
         return cached_flows
 
@@ -294,69 +351,39 @@ def get_flow_states(airport_icao: str) -> List[Dict]:
     lat, lon = coords
     flows: List[Dict] = []
 
-    # 2. Try OpenSky bounding-box states first
-    bbox = get_airport_bbox_flow(airport_icao)
-    if bbox:
-        lamin, lamax, lomin, lomax = bbox
-        data = _make_request(
-            "/api/states/all",
-            {"lamin": lamin, "lamax": lamax, "lomin": lomin, "lomax": lomax},
-        )
-        if data:
-            for s in data:
-                try:
-                    if s[6] is None or s[5] is None:
-                        continue
-                    flows.append(
-                        {
-                            "lat": float(s[6]),
-                            "lon": float(s[5]),
-                            "heading": s[10],
-                            "velocity": s[9],
-                            "icao24": str(s[0]).strip(),
-                            "callsign": str(s[1] or "").strip(),
-                            "source": "opensky",
-                        }
-                    )
-                except Exception:
-                    continue
+    # 2. Try live ADS-B point providers first on Cloud Run (instant, never blocked, updates every 1s)
+    flows = _fetch_adsb_v2_point(lat, lon, radius_nm=35)
 
-    # 3. IF OpenSky is blocked/unreachable, use airplanes.live v2 point endpoint (never blocked by cloud IPs)
+    # 3. Fallback to OpenSky bounding-box states if ADS-B aggregators didn't return data
     if not flows:
-        try:
-            url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/40"
-            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=4.0)
-            resp.raise_for_status()
-            payload = resp.json()
-            ac_list = payload.get("ac") or []
-            for ac in ac_list:
-                lat_val = ac.get("lat")
-                lon_val = ac.get("lon")
-                if lat_val is None or lon_val is None:
-                    continue
-                flows.append(
-                    {
-                        "lat": float(lat_val),
-                        "lon": float(lon_val),
-                        "heading": ac.get("track"),
-                        "velocity": ac.get("gs"),  # Ground speed in knots, map handles scaling
-                        "icao24": str(ac.get("hex") or "").strip().lower(),
-                        "callsign": str(ac.get("flight") or "").strip(),
-                        "source": "airplanes.live",
-                    }
-                )
-            if flows:
-                print(f"--- AIRPLANES.LIVE FALLBACK: Loaded {len(flows)} live aircraft for {airport_icao}.", file=sys.stderr)
-        except Exception as e:
-            print(f"--- AIRPLANES.LIVE ERROR: {e}", file=sys.stderr)
+        bbox = get_airport_bbox_flow(airport_icao)
+        if bbox:
+            lamin, lamax, lomin, lomax = bbox
+            data = _make_request(
+                "/api/states/all",
+                {"lamin": lamin, "lamax": lamax, "lomin": lomin, "lomax": lomax},
+            )
+            if data:
+                for s in data:
+                    try:
+                        if s[6] is None or s[5] is None:
+                            continue
+                        flows.append(
+                            {
+                                "lat": float(s[6]),
+                                "lon": float(s[5]),
+                                "heading": s[10],
+                                "velocity": s[9],
+                                "icao24": str(s[0]).strip(),
+                                "callsign": str(s[1] or "").strip(),
+                                "source": "opensky",
+                            }
+                        )
+                    except Exception:
+                        continue
 
     if flows:
         save_cached_flow_states(airport_icao, flows)
-        return flows
 
-    # 4. Final fallback to SQLite stale cache
-    stale_cache = get_cached_flow_states(airport_icao, max_age_sec=86400 * 7)
-    if stale_cache:
-        return stale_cache
-
-    return []
+    # Never return stale 24-hour cache; return live flows only
+    return flows

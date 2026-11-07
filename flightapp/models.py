@@ -24,6 +24,7 @@ DB_NAME = os.getenv("DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__fi
 def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_NAME)
 
+
 def init_db() -> None:
     conn = _connect()
     cur = conn.cursor()
@@ -54,6 +55,9 @@ def init_db() -> None:
         """
     )
 
+    # CRITICAL: Wipe any stale local flow_cache snapshots baked into flights.db on startup
+    cur.execute("DELETE FROM flow_cache")
+
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_flight_search ON flights (
@@ -67,7 +71,8 @@ def init_db() -> None:
     conn.close()
 
 
-def get_cached_flow_states(airport: str, max_age_sec: int = 86400) -> Optional[List[Dict]]:
+def get_cached_flow_states(airport: str, max_age_sec: int = 12) -> Optional[List[Dict]]:
+    """Only returns flow states if they were fetched within the last `max_age_sec` seconds."""
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
@@ -83,7 +88,7 @@ def get_cached_flow_states(airport: str, max_age_sec: int = 86400) -> Optional[L
     states_json, updated_at = row
     now = int(time.time())
 
-    if (now - updated_at) <= max_age_sec:
+    if 0 <= (now - updated_at) <= max_age_sec:
         try:
             return json.loads(states_json)
         except Exception:
@@ -178,7 +183,6 @@ def add_flight(
         conn.close()
         return
 
-    # STRICT DEDUPLICATION: Check if this icao24 + flight_kind was recorded within the last 12 hours
     cur.execute(
         """
         SELECT id FROM flights 
@@ -192,7 +196,6 @@ def add_flight(
     existing = cur.fetchone()
 
     if existing:
-        # Update callsign or airports if missing
         cur.execute(
             """
             UPDATE flights 
@@ -207,7 +210,6 @@ def add_flight(
         conn.close()
         return
 
-    # Insert clean new unique row
     cur.execute(
         """
         INSERT INTO flights (
